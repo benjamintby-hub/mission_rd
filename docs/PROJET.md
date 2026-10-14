@@ -443,10 +443,6 @@ Nous étions deux sur le projet. J'ai porté deux parties de `02_modelisation.R`
   patients. C'est cette analyse qui a mis en évidence la régression vers la moyenne et le
   rôle central de l'IMC.
 
-L'extraction des descripteurs à partir des fichiers bruts (`01_extraction_descripteurs.Rmd`)
-a été menée principalement par mon binôme. Je connais son fonctionnement (§5), mais ce
-n'est pas la partie que j'ai développée.
-
 **Q : Quels outils ?**
 R : `read.gt3x` pour lire les fichiers ActiGraph, `RcppRoll` pour les fenêtres glissantes
 rapides, `nonlinearTseries` (DFA), `entropy`, `moments`, `e1071` (SVM), `FNN` (KNN),
