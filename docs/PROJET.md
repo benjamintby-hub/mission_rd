@@ -428,8 +428,24 @@ subjectif, même un très bon descripteur aurait du mal à émerger. La confusio
 l'IMC complique en plus l'interprétation.
 
 **Q : Quel a été votre rôle ?**
-*À compléter par moi.* Par exemple : extraction des descripteurs, détection d'inactivité,
-pipeline ML, analyse des erreurs, rédaction du rapport.
+Nous étions deux sur le projet. J'ai porté deux parties de `02_modelisation.R`.
+
+- **Modélisation ML** : j'ai mis en place le protocole Leave-One-Out, adapté à nos
+  66 patients, avec une normalisation recalculée dans chaque fold. J'ai comparé cinq
+  modèles (baseline, KNN, SVM, arbre, Random Forest) sur trois jeux de variables
+  (accéléro, clinique, combiné), calibré les hyperparamètres par recherche en grille, et
+  testé deux façons de réduire la dimension : la sélection des variables les plus
+  importantes (%IncMSE) et l'ACP.
+- **Analyse exploratoire et interprétation** : en amont, j'ai fait les corrélations de
+  Spearman, l'ACP et le clustering (K-means et Ward, choix de K par la silhouette). En
+  aval, j'ai analysé les erreurs : prédictions contre valeurs réelles, identification des
+  patients mal prédits, tests de Wilcoxon et de Fisher, et un arbre pour caractériser ces
+  patients. C'est cette analyse qui a mis en évidence la régression vers la moyenne et le
+  rôle central de l'IMC.
+
+L'extraction des descripteurs à partir des fichiers bruts (`01_extraction_descripteurs.Rmd`)
+a été menée principalement par mon binôme. Je connais son fonctionnement (§5), mais ce
+n'est pas la partie que j'ai développée.
 
 **Q : Quels outils ?**
 R : `read.gt3x` pour lire les fichiers ActiGraph, `RcppRoll` pour les fenêtres glissantes
