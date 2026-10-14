@@ -1,0 +1,23 @@
+# Données patients : ne jamais versionner (données de santé d'une étude clinique)
+data/*
+!data/README.md
+
+# Sorties générées par les scripts
+outputs/
+
+# R / RStudio
+.Rhistory
+.RData
+.RDataTmp
+.Rproj.user/
+*.Rproj
+*.nb.html
+*_cache/
+*_files/
+01_extraction_descripteurs.html
+
+# Système
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*

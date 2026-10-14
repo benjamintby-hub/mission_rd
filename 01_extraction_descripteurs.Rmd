@@ -1,0 +1,444 @@
+---
+title: "Extraction Descripteurs Accélérométriques"
+author: "Benjamin & Yasser"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r packages}
+library(read.gt3x)
+library(tibble)
+library(RcppRoll)
+library(moments)
+library(nonlinearTseries)
+library(entropy)
+```
+
+Étape 1 du projet : lit les enregistrements bruts `.gt3x` (accéléromètre tri-axial,
+100 Hz) de chaque patient, retire les périodes d'inactivité (sommeil + non-port),
+calcule 118 descripteurs par patient et les écrit dans `data/matrice_descripteurs.csv`,
+qui est l'entrée de `02_modelisation.R`.
+
+Les chemins sont relatifs à la racine du projet (dossier qui contient ce fichier).
+
+```{r parametres}
+chemin_dossier <- "data/gt3x"          # dossier contenant les fichiers .gt3x
+chemin_sortie  <- "data/matrice_descripteurs.csv"
+n_echantillonnage <- 100               # décimation 1/100 : 100 Hz -> 1 Hz pour la détection
+freq_orig <- 100                       # fréquence du capteur (Hz)
+duree_fenetre_min <- 5                 # fenêtre de l'écart-type glissant (min)
+seuil_sd <- 0.01                       # seuil d'écart-type de la norme (g) en dessous duquel = inactif
+taille_fenetre_eveil_sec <- 60         # éveil < 60 s au milieu d'une inactivité -> inactif
+taille_fenetre_nonwear_sec <- 60       # inactivité < 60 s au milieu d'un éveil -> éveil
+fenetre_rolling <- 1000                # fenêtre des descripteurs glissants (échantillons, 10 s)
+step_dfa_glissante <- 100000           # pas entre deux fenêtres DFA / entropie (échantillons)
+```
+
+```{r detection}
+files <- list.files(path = chemin_dossier, pattern = "\\.gt3x$", full.names = TRUE)
+if (length(files) == 0) stop("Aucun fichier .gt3x trouvé")
+```
+
+```{r fonction}
+extraire_descripteurs <- function(filepath, n_echantillonnage, step_dfa) {
+  
+  patient_id <- basename(filepath)
+  
+  data <- read.gt3x(filepath, asDataFrame = TRUE)
+  data_df <- as_tibble(data)
+  data_df$norme <- sqrt(data_df$X^2 + data_df$Y^2 + data_df$Z^2)
+  
+  points_par_sec <- freq_orig / n_echantillonnage
+  width_reel <- duree_fenetre_min * 60 * points_par_sec
+  taille_fenetre_eveil <- taille_fenetre_eveil_sec * freq_orig
+  taille_fenetre_nonwear <- taille_fenetre_nonwear_sec * freq_orig
+  
+  idx_sample <- seq(1, nrow(data_df), by = n_echantillonnage)
+  data_sample <- data_df[idx_sample, ]
+  
+  start_time <- as.POSIXct("2026-01-01 09:00:00")
+  pas_en_secondes <- n_echantillonnage / freq_orig
+  data_sample$time <- start_time + seq(0, nrow(data_sample)-1) * pas_en_secondes
+  
+  data_sample$sd_temp <- roll_sd(data_sample$norme, n = width_reel, fill = NA, align = "center")
+  data_sample$inactif <- ifelse(data_sample$sd_temp < seuil_sd, 1, 0)
+  data_sample$inactif[is.na(data_sample$inactif)] <- 0
+  
+  inactif_full <- rep(data_sample$inactif, each = n_echantillonnage)
+  data_df$inactif <- inactif_full[1:nrow(data_df)]
+  
+  # Lissage : les courtes périodes d'éveil (< 60 s) au milieu d'une inactivité deviennent inactives
+  sequences <- rle(data_df$inactif)
+  interruptions_courtes_eveil <- sequences$values == 0 & sequences$lengths < taille_fenetre_eveil
+  sequences$values[interruptions_courtes_eveil] <- 1
+  # Recalcul du RLE pour fusionner les segments devenus contigus : sans cela, les segments
+  # qui viennent d'être passés à 1 (tous < 60 s) seraient remis à 0 par l'étape suivante
+  sequences <- rle(inverse.rle(sequences))
+  # Les courtes inactivités (< 60 s) au milieu d'un éveil redeviennent de l'éveil
+  interruptions_courtes_nonwear <- sequences$values == 1 & sequences$lengths < taille_fenetre_nonwear
+  sequences$values[interruptions_courtes_nonwear] <- 0
+  data_df$inactif <- inverse.rle(sequences)
+  
+  data_df$time <- start_time + seq(0, nrow(data_df)-1) / freq_orig
+  data_awake <- data_df[data_df$inactif == 0, ]
+  
+  desc_global <- c(
+    X_mean = mean(data_awake$X, na.rm = TRUE),
+    X_sd = sd(data_awake$X, na.rm = TRUE),
+    X_q00 = quantile(data_awake$X, 0.00, na.rm = TRUE),
+    X_q10 = quantile(data_awake$X, 0.10, na.rm = TRUE),
+    X_q20 = quantile(data_awake$X, 0.20, na.rm = TRUE),
+    X_q30 = quantile(data_awake$X, 0.30, na.rm = TRUE),
+    X_q40 = quantile(data_awake$X, 0.40, na.rm = TRUE),
+    X_q50 = quantile(data_awake$X, 0.50, na.rm = TRUE),
+    X_q60 = quantile(data_awake$X, 0.60, na.rm = TRUE),
+    X_q70 = quantile(data_awake$X, 0.70, na.rm = TRUE),
+    X_q80 = quantile(data_awake$X, 0.80, na.rm = TRUE),
+    X_q90 = quantile(data_awake$X, 0.90, na.rm = TRUE),
+    X_q100 = quantile(data_awake$X, 1.00, na.rm = TRUE),
+    X_kurtosis = kurtosis(data_awake$X),
+    X_skewness = skewness(data_awake$X),
+    
+    Y_mean = mean(data_awake$Y, na.rm = TRUE),
+    Y_sd = sd(data_awake$Y, na.rm = TRUE),
+    Y_q00 = quantile(data_awake$Y, 0.00, na.rm = TRUE),
+    Y_q10 = quantile(data_awake$Y, 0.10, na.rm = TRUE),
+    Y_q20 = quantile(data_awake$Y, 0.20, na.rm = TRUE),
+    Y_q30 = quantile(data_awake$Y, 0.30, na.rm = TRUE),
+    Y_q40 = quantile(data_awake$Y, 0.40, na.rm = TRUE),
+    Y_q50 = quantile(data_awake$Y, 0.50, na.rm = TRUE),
+    Y_q60 = quantile(data_awake$Y, 0.60, na.rm = TRUE),
+    Y_q70 = quantile(data_awake$Y, 0.70, na.rm = TRUE),
+    Y_q80 = quantile(data_awake$Y, 0.80, na.rm = TRUE),
+    Y_q90 = quantile(data_awake$Y, 0.90, na.rm = TRUE),
+    Y_q100 = quantile(data_awake$Y, 1.00, na.rm = TRUE),
+    Y_kurtosis = kurtosis(data_awake$Y),
+    Y_skewness = skewness(data_awake$Y),
+    
+    Z_mean = mean(data_awake$Z, na.rm = TRUE),
+    Z_sd = sd(data_awake$Z, na.rm = TRUE),
+    Z_q00 = quantile(data_awake$Z, 0.00, na.rm = TRUE),
+    Z_q10 = quantile(data_awake$Z, 0.10, na.rm = TRUE),
+    Z_q20 = quantile(data_awake$Z, 0.20, na.rm = TRUE),
+    Z_q30 = quantile(data_awake$Z, 0.30, na.rm = TRUE),
+    Z_q40 = quantile(data_awake$Z, 0.40, na.rm = TRUE),
+    Z_q50 = quantile(data_awake$Z, 0.50, na.rm = TRUE),
+    Z_q60 = quantile(data_awake$Z, 0.60, na.rm = TRUE),
+    Z_q70 = quantile(data_awake$Z, 0.70, na.rm = TRUE),
+    Z_q80 = quantile(data_awake$Z, 0.80, na.rm = TRUE),
+    Z_q90 = quantile(data_awake$Z, 0.90, na.rm = TRUE),
+    Z_q100 = quantile(data_awake$Z, 1.00, na.rm = TRUE),
+    Z_kurtosis = kurtosis(data_awake$Z),
+    Z_skewness = skewness(data_awake$Z),
+    
+    norme_mean = mean(data_awake$norme, na.rm = TRUE),
+    norme_sd = sd(data_awake$norme, na.rm = TRUE),
+    norme_q00 = quantile(data_awake$norme, 0.00, na.rm = TRUE),
+    norme_q10 = quantile(data_awake$norme, 0.10, na.rm = TRUE),
+    norme_q20 = quantile(data_awake$norme, 0.20, na.rm = TRUE),
+    norme_q30 = quantile(data_awake$norme, 0.30, na.rm = TRUE),
+    norme_q40 = quantile(data_awake$norme, 0.40, na.rm = TRUE),
+    norme_q50 = quantile(data_awake$norme, 0.50, na.rm = TRUE),
+    norme_q60 = quantile(data_awake$norme, 0.60, na.rm = TRUE),
+    norme_q70 = quantile(data_awake$norme, 0.70, na.rm = TRUE),
+    norme_q80 = quantile(data_awake$norme, 0.80, na.rm = TRUE),
+    norme_q90 = quantile(data_awake$norme, 0.90, na.rm = TRUE),
+    norme_q100 = quantile(data_awake$norme, 1.00, na.rm = TRUE),
+    norme_kurtosis = kurtosis(data_awake$norme),
+    norme_skewness = skewness(data_awake$norme)
+  )
+  
+  desc_utilisation <- c(
+    nonwear_duration_hours = sum(data_df$inactif) / (freq_orig * 3600),
+    nonwear_percentage = (sum(data_df$inactif) / nrow(data_df)) * 100
+  )
+  
+  n_win <- nrow(data_awake)
+  idx_windows <- seq(fenetre_rolling, n_win, by = fenetre_rolling)
+  
+  X_sd_roll_vals <- numeric(length(idx_windows))
+  Y_sd_roll_vals <- numeric(length(idx_windows))
+  Z_sd_roll_vals <- numeric(length(idx_windows))
+  norme_sd_roll_vals <- numeric(length(idx_windows))
+  
+  X_var_roll_vals <- numeric(length(idx_windows))
+  Y_var_roll_vals <- numeric(length(idx_windows))
+  Z_var_roll_vals <- numeric(length(idx_windows))
+  norme_var_roll_vals <- numeric(length(idx_windows))
+  
+  for (i in seq_along(idx_windows)) {
+    pos <- idx_windows[i]
+    window_data <- data_awake[(pos - fenetre_rolling + 1):pos, ]
+    
+    X_sd_roll_vals[i] <- sd(window_data$X, na.rm = TRUE)
+    Y_sd_roll_vals[i] <- sd(window_data$Y, na.rm = TRUE)
+    Z_sd_roll_vals[i] <- sd(window_data$Z, na.rm = TRUE)
+    norme_sd_roll_vals[i] <- sd(window_data$norme, na.rm = TRUE)
+    
+    X_var_roll_vals[i] <- var(window_data$X, na.rm = TRUE)
+    Y_var_roll_vals[i] <- var(window_data$Y, na.rm = TRUE)
+    Z_var_roll_vals[i] <- var(window_data$Z, na.rm = TRUE)
+    norme_var_roll_vals[i] <- var(window_data$norme, na.rm = TRUE)
+  }
+  
+  desc_glissants <- c(
+    X_sd_roll_mean = mean(X_sd_roll_vals, na.rm = TRUE),
+    X_sd_roll_sd = sd(X_sd_roll_vals, na.rm = TRUE),
+    Y_sd_roll_mean = mean(Y_sd_roll_vals, na.rm = TRUE),
+    Y_sd_roll_sd = sd(Y_sd_roll_vals, na.rm = TRUE),
+    Z_sd_roll_mean = mean(Z_sd_roll_vals, na.rm = TRUE),
+    Z_sd_roll_sd = sd(Z_sd_roll_vals, na.rm = TRUE),
+    norme_sd_roll_mean = mean(norme_sd_roll_vals, na.rm = TRUE),
+    norme_sd_roll_sd = sd(norme_sd_roll_vals, na.rm = TRUE),
+    
+    X_var_roll_mean = mean(X_var_roll_vals, na.rm = TRUE),
+    X_var_roll_sd = sd(X_var_roll_vals, na.rm = TRUE),
+    Y_var_roll_mean = mean(Y_var_roll_vals, na.rm = TRUE),
+    Y_var_roll_sd = sd(Y_var_roll_vals, na.rm = TRUE),
+    Z_var_roll_mean = mean(Z_var_roll_vals, na.rm = TRUE),
+    Z_var_roll_sd = sd(Z_var_roll_vals, na.rm = TRUE),
+    norme_var_roll_mean = mean(norme_var_roll_vals, na.rm = TRUE),
+    norme_var_roll_sd = sd(norme_var_roll_vals, na.rm = TRUE)
+  )
+  
+  f_dfa_complet <- function(x) {
+    x_clean <- x[!is.na(x)]
+    
+    if (length(x_clean) < 100) return(c(alpha = NA, r2 = NA))
+    if (sd(x_clean) == 0) return(c(alpha = NA, r2 = NA))
+    if (any(!is.finite(x_clean))) return(c(alpha = NA, r2 = NA))
+    
+    result <- tryCatch({
+      mod <- dfa(x_clean, window.size.range = c(10, floor(length(x_clean)/3)), 
+                 npoints = 20, do.plot = FALSE)
+      alpha <- estimate(mod)[[1]]
+      sizes <- mod$window.sizes
+      fluct <- mod$fluctuation.function
+      
+      if (any(!is.finite(fluct)) || any(!is.finite(sizes))) {
+        return(c(alpha = NA, r2 = NA))
+      }
+      
+      df_temp <- data.frame(x = log(sizes), y = log(fluct))
+      df_temp <- df_temp[is.finite(df_temp$x) & is.finite(df_temp$y), ]
+      
+      if (nrow(df_temp) < 5) return(c(alpha = NA, r2 = NA))
+      
+      lm_temp <- lm(y ~ x, df_temp)
+      r2 <- summary(lm_temp)$r.squared
+      
+      c(alpha = alpha, r2 = r2)
+    }, error = function(e) {
+      c(alpha = NA, r2 = NA)
+    })
+    
+    return(result)
+  }
+  
+  idx_dfa <- seq(fenetre_rolling, n_win, by = step_dfa)
+  
+  X_alpha_vals <- numeric(length(idx_dfa))
+  X_r2_vals <- numeric(length(idx_dfa))
+  Y_alpha_vals <- numeric(length(idx_dfa))
+  Y_r2_vals <- numeric(length(idx_dfa))
+  Z_alpha_vals <- numeric(length(idx_dfa))
+  Z_r2_vals <- numeric(length(idx_dfa))
+  norme_alpha_vals <- numeric(length(idx_dfa))
+  norme_r2_vals <- numeric(length(idx_dfa))
+  
+  for (i in seq_along(idx_dfa)) {
+    pos <- idx_dfa[i]
+    
+    res_X <- f_dfa_complet(data_awake$X[(pos - fenetre_rolling + 1):pos])
+    X_alpha_vals[i] <- res_X["alpha"]
+    X_r2_vals[i] <- res_X["r2"]
+    
+    res_Y <- f_dfa_complet(data_awake$Y[(pos - fenetre_rolling + 1):pos])
+    Y_alpha_vals[i] <- res_Y["alpha"]
+    Y_r2_vals[i] <- res_Y["r2"]
+    
+    res_Z <- f_dfa_complet(data_awake$Z[(pos - fenetre_rolling + 1):pos])
+    Z_alpha_vals[i] <- res_Z["alpha"]
+    Z_r2_vals[i] <- res_Z["r2"]
+    
+    res_norme <- f_dfa_complet(data_awake$norme[(pos - fenetre_rolling + 1):pos])
+    norme_alpha_vals[i] <- res_norme["alpha"]
+    norme_r2_vals[i] <- res_norme["r2"]
+  }
+  
+  idx_ent <- seq(fenetre_rolling, n_win, by = step_dfa)
+  
+  X_entrop_vals <- rep(NA_real_, length(idx_ent))
+  Y_entrop_vals <- rep(NA_real_, length(idx_ent))
+  Z_entrop_vals <- rep(NA_real_, length(idx_ent))
+  norme_entrop_vals <- rep(NA_real_, length(idx_ent))
+  
+  for (i in seq_along(idx_ent)) {
+    pos <- idx_ent[i]
+    
+    x_X <- data_awake$X[(pos - fenetre_rolling + 1):pos]
+    bins_X <- cut(x_X, breaks = 10, labels = FALSE)
+    bins_X <- bins_X[!is.na(bins_X)]
+    if (length(bins_X) > 0) {
+      X_entrop_vals[i] <- entropy(table(bins_X))
+    }
+    
+    x_Y <- data_awake$Y[(pos - fenetre_rolling + 1):pos]
+    bins_Y <- cut(x_Y, breaks = 10, labels = FALSE)
+    bins_Y <- bins_Y[!is.na(bins_Y)]
+    if (length(bins_Y) > 0) {
+      Y_entrop_vals[i] <- entropy(table(bins_Y))
+    }
+    
+    x_Z <- data_awake$Z[(pos - fenetre_rolling + 1):pos]
+    bins_Z <- cut(x_Z, breaks = 10, labels = FALSE)
+    bins_Z <- bins_Z[!is.na(bins_Z)]
+    if (length(bins_Z) > 0) {
+      Z_entrop_vals[i] <- entropy(table(bins_Z))
+    }
+    
+    x_norme <- data_awake$norme[(pos - fenetre_rolling + 1):pos]
+    bins_norme <- cut(x_norme, breaks = 10, labels = FALSE)
+    bins_norme <- bins_norme[!is.na(bins_norme)]
+    if (length(bins_norme) > 0) {
+      norme_entrop_vals[i] <- entropy(table(bins_norme))
+    }
+  }
+  
+  desc_freq_glissants <- c(
+    X_alpha_roll_mean = mean(X_alpha_vals, na.rm = TRUE),
+    X_alpha_roll_sd = sd(X_alpha_vals, na.rm = TRUE),
+    X_r2_roll_mean = mean(X_r2_vals, na.rm = TRUE),
+    X_r2_roll_sd = sd(X_r2_vals, na.rm = TRUE),
+    X_entropy_roll_mean = mean(X_entrop_vals, na.rm = TRUE),
+    X_entropy_roll_sd = sd(X_entrop_vals, na.rm = TRUE),
+    
+    Y_alpha_roll_mean = mean(Y_alpha_vals, na.rm = TRUE),
+    Y_alpha_roll_sd = sd(Y_alpha_vals, na.rm = TRUE),
+    Y_r2_roll_mean = mean(Y_r2_vals, na.rm = TRUE),
+    Y_r2_roll_sd = sd(Y_r2_vals, na.rm = TRUE),
+    Y_entropy_roll_mean = mean(Y_entrop_vals, na.rm = TRUE),
+    Y_entropy_roll_sd = sd(Y_entrop_vals, na.rm = TRUE),
+    
+    Z_alpha_roll_mean = mean(Z_alpha_vals, na.rm = TRUE),
+    Z_alpha_roll_sd = sd(Z_alpha_vals, na.rm = TRUE),
+    Z_r2_roll_mean = mean(Z_r2_vals, na.rm = TRUE),
+    Z_r2_roll_sd = sd(Z_r2_vals, na.rm = TRUE),
+    Z_entropy_roll_mean = mean(Z_entrop_vals, na.rm = TRUE),
+    Z_entropy_roll_sd = sd(Z_entrop_vals, na.rm = TRUE),
+    
+    norme_alpha_roll_mean = mean(norme_alpha_vals, na.rm = TRUE),
+    norme_alpha_roll_sd = sd(norme_alpha_vals, na.rm = TRUE),
+    norme_r2_roll_mean = mean(norme_r2_vals, na.rm = TRUE),
+    norme_r2_roll_sd = sd(norme_r2_vals, na.rm = TRUE),
+    norme_entropy_roll_mean = mean(norme_entrop_vals, na.rm = TRUE),
+    norme_entropy_roll_sd = sd(norme_entrop_vals, na.rm = TRUE)
+  )
+  
+  calcul_dfa_global <- function(signal) {
+    signal_clean <- signal[!is.na(signal)]
+    
+    if (length(signal_clean) < 100) {
+      return(c(alpha_global = NA, alpha_min = NA, alpha_max = NA, R2 = NA))
+    }
+    
+    if (sd(signal_clean) == 0) {
+      return(c(alpha_global = NA, alpha_min = NA, alpha_max = NA, R2 = NA))
+    }
+    
+    result <- tryCatch({
+      dfa_global <- dfa(signal_clean, 
+                        window.size.range = c(10, floor(length(signal_clean)/3)), 
+                        npoints = 20, do.plot = FALSE)
+      
+      alpha_global <- estimate(dfa_global)[[1]]
+      sizes <- dfa_global$window.sizes
+      fluct <- dfa_global$fluctuation.function
+      
+      if (any(!is.finite(fluct)) || any(!is.finite(sizes))) {
+        return(c(alpha_global = NA, alpha_min = NA, alpha_max = NA, R2 = NA))
+      }
+      
+      df <- data.frame(x = log(sizes), y = log(fluct))
+      df <- df[is.finite(df$x) & is.finite(df$y), ]
+      
+      if (nrow(df) < 5) {
+        return(c(alpha_global = NA, alpha_min = NA, alpha_max = NA, R2 = NA))
+      }
+      
+      lm_mod <- lm(y ~ x, df)
+      r2 <- summary(lm_mod)$r.squared
+      conf <- confint(lm_mod, "x", level = 0.95)
+      
+      c(alpha_global = alpha_global,
+        alpha_min = conf[1],
+        alpha_max = conf[2],
+        R2 = r2)
+    }, error = function(e) {
+      c(alpha_global = NA, alpha_min = NA, alpha_max = NA, R2 = NA)
+    })
+    
+    return(result)
+  }
+  
+  X_dfa_global <- calcul_dfa_global(data_awake$X)
+  Y_dfa_global <- calcul_dfa_global(data_awake$Y)
+  Z_dfa_global <- calcul_dfa_global(data_awake$Z)
+  norme_dfa_global <- calcul_dfa_global(data_awake$norme)
+  
+  
+  desc_dfa <- c(
+    X_alpha_global = X_dfa_global["alpha_global"],
+    X_alpha_min = X_dfa_global["alpha_min"],
+    X_alpha_max = X_dfa_global["alpha_max"],
+    X_R2 = X_dfa_global["R2"],
+    
+    Y_alpha_global = Y_dfa_global["alpha_global"],
+    Y_alpha_min = Y_dfa_global["alpha_min"],
+    Y_alpha_max = Y_dfa_global["alpha_max"],
+    Y_R2 = Y_dfa_global["R2"],
+    
+    Z_alpha_global = Z_dfa_global["alpha_global"],
+    Z_alpha_min = Z_dfa_global["alpha_min"],
+    Z_alpha_max = Z_dfa_global["alpha_max"],
+    Z_R2 = Z_dfa_global["R2"],
+    
+    norme_alpha_global = norme_dfa_global["alpha_global"],
+    norme_alpha_min = norme_dfa_global["alpha_min"],
+    norme_alpha_max = norme_dfa_global["alpha_max"],
+    norme_R2 = norme_dfa_global["R2"]
+  )
+  
+  descripteurs <- c(desc_global, desc_utilisation, desc_glissants, desc_freq_glissants, desc_dfa)
+  
+  ligne <- data.frame(patient = patient_id, t(descripteurs), stringsAsFactors = FALSE)
+  return(ligne)
+}
+```
+
+```{r extraction}
+matrice_descripteurs <- data.frame()
+
+for (i in 1:length(files)) {
+  ligne <- extraire_descripteurs(files[i], n_echantillonnage = n_echantillonnage,
+                                 step_dfa = step_dfa_glissante)
+  matrice_descripteurs <- rbind(matrice_descripteurs, ligne)
+}
+```
+
+```{r sauvegarde}
+if (nrow(matrice_descripteurs) > 0) {
+  # Nom fixe : c'est le fichier lu par 02_modelisation.R
+  write.csv(matrice_descripteurs, chemin_sortie, row.names = FALSE)
+}
+```
+
+```{r apercu}
+if (nrow(matrice_descripteurs) > 0) {
+  head(matrice_descripteurs[, 1:min(10, ncol(matrice_descripteurs))])
+}
+```
